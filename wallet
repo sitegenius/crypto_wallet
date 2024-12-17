@@ -1,0 +1,261 @@
+<?php
+/**
+ * Plugin Name: Crypto Wallet Manager
+ * Description: A plugin to manage cryptocurrency wallets and transactions.
+ * Version: 1.1
+ * Author: صادق ستوده
+ */
+
+// جلوگیری از دسترسی مستقیم
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// ایجاد جدول‌ها در زمان فعال‌سازی
+function cwp_register_plugin() {
+    global $wpdb;
+    $charset_collate = $wpdb->get_charset_collate();
+
+    $wallets_table = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}crypto_wallets (
+        id mediumint(9) NOT NULL AUTO_INCREMENT,
+        currency varchar(10) NOT NULL,
+        address text NOT NULL,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        PRIMARY KEY (id)
+    ) $charset_collate;";
+
+    $transactions_table = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}crypto_transactions (
+        id mediumint(9) NOT NULL AUTO_INCREMENT,
+        wallet_id mediumint(9) NOT NULL,
+        amount float NOT NULL,
+        transaction_type varchar(10) NOT NULL,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        PRIMARY KEY (id)
+    ) $charset_collate;";
+
+    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+    dbDelta($wallets_table);
+    dbDelta($transactions_table);
+}
+register_activation_hook(__FILE__, 'cwp_register_plugin');
+
+// بارگذاری بروزرسانی از GitHub
+add_filter('site_transient_update_plugins', 'cwp_check_for_update');
+
+function cwp_check_for_update($transient) {
+    if (empty($transient->checked)) {
+        return $transient;
+    }
+
+    $plugin_slug = 'crypto_wallet'; // نام پوشه پلاگین در مخزن
+    $remote_url = 'https://api.github.com/repos/sitegenius/crypto_wallet/releases/latest'; // آدرس API GitHub
+
+    $response = wp_remote_get($remote_url);
+
+    if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+        return $transient;
+    }
+
+    $body = json_decode(wp_remote_retrieve_body($response));
+
+    $plugin_version = '1.0'; // نسخه فعلی پلاگین
+    $new_version = $body->tag_name; // نسخه جدید از GitHub
+
+    if (version_compare($plugin_version, $new_version, '<')) {
+        $transient->response[$plugin_slug . '/crypto-wallet-plugin.php'] = (object) array(
+            'slug' => $plugin_slug,
+            'new_version' => $new_version,
+            'url' => $body->html_url,
+            'package' => $body->zipball_url,
+        );
+    }
+
+    return $transient;
+}
+
+// افزودن شورت کد برای ثبت کیف پول
+function cwp_add_wallet() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'crypto_wallets';
+
+    if (isset($_POST['add_wallet'])) {
+        $currency = sanitize_text_field($_POST['currency']);
+        $address = sanitize_text_field($_POST['address']);
+
+        $wpdb->insert($table_name, array(
+            'currency' => $currency,
+            'address' => $address,
+        ));
+        wp_redirect(admin_url('admin.php?page=add_wallet'));
+        exit;
+    }
+
+    ob_start(); ?>
+    <h2>افزودن کیف پول</h2>
+    <form method="post">
+        <label for="currency">ارز:</label>
+        <input type="text" name="currency" id="currency" required />
+        <label for="address">آدرس:</label>
+        <input type="text" name="address" id="address" required />
+        <button type="submit" name="add_wallet">افزودن کیف پول</button>
+    </form>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('add_wallet', 'cwp_add_wallet');
+
+// افزودن شورت کد برای ثبت تراکنش‌ها
+function cwp_record_transaction() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'crypto_transactions';
+
+    if (isset($_POST['record_transaction'])) {
+        if (!isset($_POST['cwp_nonce_field']) || !wp_verify_nonce($_POST['cwp_nonce_field'], 'cwp_nonce_action')) {
+            die('شما مجاز به انجام این عمل نیستید.');
+        }
+
+        $wallet_id = intval($_POST['wallet_id']);
+        $amount = floatval($_POST['amount']);
+        $transaction_type = sanitize_text_field($_POST['transaction_type']);
+
+        $wpdb->insert($table_name, array(
+            'wallet_id' => $wallet_id,
+            'amount' => $amount,
+            'transaction_type' => $transaction_type,
+        ));
+        wp_redirect(admin_url('admin.php?page=record_transaction'));
+        exit;
+    }
+
+    $wallets = $wpdb->get_results("SELECT * FROM " . $wpdb->prefix . "crypto_wallets");
+
+    ob_start(); ?>
+    <h2>ثبت تراکنش</h2>
+    <form method="post">
+        <?php wp_nonce_field('cwp_nonce_action', 'cwp_nonce_field'); ?>
+        <label for="wallet_id">انتخاب کیف پول:</label>
+        <select name="wallet_id" id="wallet_id" required>
+            <?php foreach ($wallets as $wallet) : ?>
+                <option value="<?php echo esc_attr($wallet->id); ?>"><?php echo esc_html($wallet->currency . ' - ' . $wallet->address); ?></option>
+            <?php endforeach; ?>
+        </select>
+        <label for="amount">مقدار:</label>
+        <input type="number" name="amount" id="amount" step="0.00000001" required />
+        <label for="transaction_type">نوع تراکنش:</label>
+        <select name="transaction_type" id="transaction_type" required>
+            <option value="deposit">واریز</option>
+            <option value="withdraw">برداشت</option>
+        </select>
+        <button type="submit" name="record_transaction">ثبت تراکنش</button>
+    </form>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('record_transaction', 'cwp_record_transaction');
+
+// افزودن شورت کد برای گزارش‌گیری تراکنش‌ها
+function cwp_transaction_report() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'crypto_transactions';
+    $transactions = $wpdb->get_results("SELECT * FROM $table_name");
+
+    ob_start(); ?>
+    <h2>گزارش تراکنش‌ها</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>کیف پول (ID)</th>
+                <th>مقدار</th>
+                <th>نوع تراکنش</th>
+                <th>تاریخ ایجاد</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php if ($transactions) : ?>
+                <?php foreach ($transactions as $transaction) : ?>
+                    <tr>
+                        <td><?php echo esc_html($transaction->wallet_id); ?></td>
+                        <td><?php echo esc_html($transaction->amount); ?></td>
+                        <td><?php echo esc_html($transaction->transaction_type); ?></td>
+                        <td><?php echo esc_html($transaction->created_at); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php else : ?>
+                <tr>
+                    <td colspan="4">هیچ تراکنشی ثبت نشده است.</td>
+                </tr>
+            <?php endif; ?>
+        </tbody>
+    </table>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('transaction_report', 'cwp_transaction_report');
+
+// افزودن قابلیت حذف تراکنش‌ها
+function cwp_delete_transaction() {
+    if (isset($_POST['delete_transaction_id'])) {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'crypto_transactions';
+        $id = intval($_POST['delete_transaction_id']);
+        $wpdb->delete($table_name, array('id' => $id));
+        wp_redirect(admin_url('admin.php?page=transaction_report'));
+        exit;
+    }
+}
+
+// نمایش تراکنش‌ها با قابلیت حذف
+function cwp_display_transaction_history() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'crypto_transactions';
+    $transactions = $wpdb->get_results("SELECT * FROM $table_name");
+
+    ob_start(); ?>
+    <h2>تاریخچه تراکنش‌ها</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>کیف پول (ID)</th>
+                <th>مقدار</th>
+                <th>نوع تراکنش</th>
+                <th>تاریخ ایجاد</th>
+                <th>عملیات</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php if ($transactions) : ?>
+                <?php foreach ($transactions as $transaction) : ?>
+                    <tr>
+                        <td><?php echo esc_html($transaction->wallet_id); ?></td>
+                        <td><?php echo esc_html($transaction->amount); ?></td>
+                        <td><?php echo esc_html($transaction->transaction_type); ?></td>
+                        <td><?php echo esc_html($transaction->created_at); ?></td>
+                        <td>
+                            <form method="post" action="">
+                                <input type="hidden" name="delete_transaction_id" value="<?php echo esc_attr($transaction->id); ?>" />
+                                <button type="submit" onclick="return confirm('آیا مطمئن هستید که می‌خواهید این تراکنش را حذف کنید؟');">حذف</button>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php else : ?>
+                <tr>
+                    <td colspan="5">هیچ تراکنشی ثبت نشده است.</td>
+                </tr>
+            <?php endif; ?>
+        </tbody>
+    </table>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('display_transaction_history', 'cwp_display_transaction_history');
+
+// اطمینان از حذف تراکنش‌ها
+add_action('init', 'cwp_delete_transaction');
+
+// بهینه‌سازی و بارگذاری CSS و JS
+function cwp_enqueue_scripts() {
+    wp_enqueue_style('cwp-style', plugins_url('css/style.css', __FILE__));
+    wp_enqueue_script('cwp-script', plugins_url('js/script.js', __FILE__), array('jquery'), null, true);
+}
+add_action('wp_enqueue_scripts', 'cwp_enqueue_scripts');
